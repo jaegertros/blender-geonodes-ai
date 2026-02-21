@@ -1,0 +1,317 @@
+{
+  "description": "Hardcoded rules and axioms about Blender geometry nodes that should NOT be discovered empirically. These are structural invariants of the system that would waste time and risk never being found through exploration.",
+  "blender_version_range": "4.5 LTS+",
+  "last_updated": "2026-02-20",
+
+  "structural_rules": {
+    "description": "Rules about how node trees must be structured to function",
+
+    "group_input_output": {
+      "rule": "Every functional geometry node tree (node group) requires a Group Input and Group Output node",
+      "details": [
+        "Group Input provides the entry point - data flows in through its output sockets",
+        "Group Output provides the exit point - data flows out through its input sockets",
+        "These are auto-created when you add interface sockets to the node tree",
+        "A tree with no Group Output produces no result",
+        "The Geometry socket on Group Output is what Blender evaluates"
+      ],
+      "bpy_notes": {
+        "create_interface_socket": "tree.interface.new_socket(name, in_out='INPUT'|'OUTPUT', socket_type='NodeSocket...')",
+        "auto_creates_nodes": true,
+        "node_types": {
+          "group_input": "NodeGroupInput",
+          "group_output": "NodeGroupOutput"
+        }
+      }
+    },
+
+    "geometry_modifier": {
+      "rule": "To be used as a modifier, the node tree must have at least one Geometry input and one Geometry output",
+      "details": [
+        "The first Geometry input becomes the modified object's geometry",
+        "The first Geometry output becomes the result geometry",
+        "Additional inputs become modifier properties in the UI",
+        "Without both Geometry in and out, the modifier does nothing"
+      ]
+    },
+
+    "execution_model": {
+      "rule": "Geometry nodes evaluate lazily from output to input (pull-based)",
+      "details": [
+        "Only nodes connected (directly or indirectly) to the Group Output are evaluated",
+        "Disconnected nodes are ignored",
+        "Order of node placement doesn't matter, only connections",
+        "The node tree is a DAG (directed acyclic graph) - no cycles allowed"
+      ]
+    },
+
+    "field_vs_value": {
+      "rule": "Sockets carry either single values or fields (per-element expressions)",
+      "details": [
+        "A diamond-shaped socket indicates a field input",
+        "A circle-shaped socket indicates a single value",
+        "Fields are evaluated lazily - they represent a formula, not data",
+        "Attribute nodes (Position, Normal, Index, etc.) produce fields",
+        "Math/vector operations on fields produce new fields",
+        "Some nodes require fields, some require values, some accept both",
+        "When a single value connects to a field input, it broadcasts (same value for all elements)"
+      ],
+      "field_context": "Fields are evaluated in the context of a geometry domain (point, edge, face, corner, curve point, instance)"
+    }
+  },
+
+  "socket_type_system": {
+    "description": "Type compatibility rules derived from empirical testing (connection_matrix.json) plus known semantics",
+
+    "type_groups": {
+      "numeric": {
+        "types": ["BOOLEAN", "INT", "VALUE", "RGBA", "VECTOR"],
+        "rule": "All numeric types can freely connect to each other with implicit conversion",
+        "conversions": {
+          "BOOLEAN_to_INT": "false=0, true=1",
+          "BOOLEAN_to_VALUE": "false=0.0, true=1.0",
+          "INT_to_VALUE": "direct cast",
+          "VALUE_to_INT": "truncation (floor)",
+          "VALUE_to_BOOLEAN": "0.0=false, nonzero=true",
+          "VALUE_to_VECTOR": "broadcasts to (v, v, v)",
+          "VALUE_to_RGBA": "broadcasts to (v, v, v, 1.0)",
+          "VECTOR_to_VALUE": "takes first component (X)",
+          "RGBA_to_VALUE": "grayscale conversion",
+          "VECTOR_to_RGBA": "(x, y, z) -> (r, g, b, 1.0)",
+          "RGBA_to_VECTOR": "(r, g, b, a) -> (r, g, b)"
+        }
+      },
+      "spatial": {
+        "types": ["ROTATION", "MATRIX", "VECTOR", "VALUE"],
+        "rule": "Rotation and Matrix have limited interconversion with each other and numeric types",
+        "connections": {
+          "ROTATION_to_MATRIX": "converts to 3x3 rotation matrix (in 4x4)",
+          "MATRIX_to_ROTATION": "extracts rotation component",
+          "ROTATION_to_VECTOR": "converts to Euler angles",
+          "VALUE_to_ROTATION": "rotation around Z axis by radians",
+          "VECTOR_to_ROTATION": "Euler XYZ interpretation"
+        }
+      },
+      "resource": {
+        "types": ["GEOMETRY", "OBJECT", "COLLECTION", "IMAGE", "MATERIAL"],
+        "rule": "Resource types are completely isolated - they ONLY connect to their own type",
+        "reason": "These represent references to Blender data blocks, not numeric data"
+      },
+      "text": {
+        "types": ["STRING"],
+        "rule": "String only connects to String",
+        "reason": "No implicit to/from string conversion in the node system"
+      },
+      "special": {
+        "types": ["MENU"],
+        "rule": "Menu sockets cannot connect to anything, not even other Menu sockets via links",
+        "reason": "Menu is a UI-only enum selector, not a data flow type"
+      },
+      "internal": {
+        "types": ["BUNDLE", "CLOSURE", "CUSTOM"],
+        "rule": "Cannot be created as interface sockets, internal to specific nodes only",
+        "reason": "Used by the node system internally for special-purpose connections"
+      }
+    }
+  },
+
+  "geometry_domains": {
+    "description": "Geometry types and their per-element domains. Critical for understanding which attributes/fields apply where.",
+
+    "domains": {
+      "POINT": {
+        "applies_to": ["Mesh", "Point Cloud", "Curve"],
+        "description": "Individual vertices/control points",
+        "example_attributes": ["position", "radius", "normal (vertex normal)"]
+      },
+      "EDGE": {
+        "applies_to": ["Mesh"],
+        "description": "Connections between two vertices",
+        "example_attributes": ["crease", "seam"]
+      },
+      "FACE": {
+        "applies_to": ["Mesh"],
+        "description": "Polygonal faces",
+        "example_attributes": ["material_index", "shade_smooth"]
+      },
+      "CORNER": {
+        "applies_to": ["Mesh"],
+        "description": "Face corners (loops) - one per vertex per face",
+        "example_attributes": ["UV coordinates", "vertex colors", "split normals"]
+      },
+      "CURVE": {
+        "applies_to": ["Curve"],
+        "description": "Individual splines within a curve object",
+        "example_attributes": ["cyclic", "resolution"]
+      },
+      "INSTANCE": {
+        "applies_to": ["Instances"],
+        "description": "Instanced geometry references",
+        "example_attributes": ["transform", "instance index"]
+      },
+      "LAYER": {
+        "applies_to": ["Grease Pencil"],
+        "description": "Grease pencil layers",
+        "example_attributes": ["opacity"]
+      },
+      "GRID": {
+        "applies_to": ["Volume"],
+        "description": "OpenVDB grid data",
+        "example_attributes": ["density", "temperature"]
+      }
+    },
+
+    "geometry_types": {
+      "Mesh": {
+        "domains": ["POINT", "EDGE", "FACE", "CORNER"],
+        "description": "Polygonal mesh with vertices, edges, faces",
+        "primitive_nodes": [
+          "GeometryNodeMeshCube",
+          "GeometryNodeMeshCone",
+          "GeometryNodeMeshCylinder",
+          "GeometryNodeMeshGrid",
+          "GeometryNodeMeshIcoSphere",
+          "GeometryNodeMeshUVSphere",
+          "GeometryNodeMeshCircle",
+          "GeometryNodeMeshLine"
+        ],
+        "test_objects": [
+          {"name": "Default Cube", "bpy": "bpy.ops.mesh.primitive_cube_add()"},
+          {"name": "UV Sphere", "bpy": "bpy.ops.mesh.primitive_uv_sphere_add()"},
+          {"name": "Plane", "bpy": "bpy.ops.mesh.primitive_plane_add()"}
+        ]
+      },
+      "Curve": {
+        "domains": ["POINT", "CURVE"],
+        "description": "Spline-based curves (Bezier, NURBS, Poly)",
+        "primitive_nodes": [
+          "GeometryNodeCurveArc",
+          "GeometryNodeCurvePrimitiveBezierSegment",
+          "GeometryNodeCurvePrimitiveCircle",
+          "GeometryNodeCurvePrimitiveLine",
+          "GeometryNodeCurvePrimitiveQuadrilateral",
+          "GeometryNodeCurveSpiral",
+          "GeometryNodeCurveStar"
+        ],
+        "test_objects": [
+          {"name": "Bezier Curve", "bpy": "bpy.ops.curve.primitive_bezier_curve_add()"},
+          {"name": "NURBS Circle", "bpy": "bpy.ops.curve.primitive_nurbs_circle_add()"}
+        ]
+      },
+      "PointCloud": {
+        "domains": ["POINT"],
+        "description": "Unconnected points in space",
+        "creation": "Usually created by Distribute Points on Faces or other point generation nodes",
+        "test_approach": "Feed a mesh through GeometryNodeDistributePointsOnFaces"
+      },
+      "Volume": {
+        "domains": ["GRID"],
+        "description": "OpenVDB volumetric data",
+        "primitive_nodes": ["GeometryNodeVolumeCube"],
+        "test_objects": [
+          {"name": "Volume Cube", "bpy": "Generated via GeometryNodeVolumeCube node"}
+        ]
+      },
+      "Instances": {
+        "domains": ["INSTANCE"],
+        "description": "Referenced copies of geometry with individual transforms",
+        "creation": "Created by Instance on Points, GeometryNodeInstanceOnPoints",
+        "key_concept": "Instances are lightweight - they share the source geometry data"
+      },
+      "GreasePencil": {
+        "domains": ["POINT", "CURVE", "LAYER"],
+        "description": "2D drawing strokes in 3D space (Blender 4.0+)",
+        "note": "Grease pencil v3 in Blender 4.0+ is geometry-nodes compatible"
+      }
+    }
+  },
+
+  "node_tree_creation": {
+    "description": "How to programmatically create and set up a geometry node tree",
+
+    "minimal_modifier_setup": {
+      "steps": [
+        "1. Create a mesh object (or use existing)",
+        "2. Create a geometry node tree: bpy.data.node_groups.new('MyTree', 'GeometryNodeTree')",
+        "3. Add Geometry input/output: tree.interface.new_socket('Geometry', in_out='INPUT/OUTPUT', socket_type='NodeSocketGeometry')",
+        "4. Link Group Input Geometry -> Group Output Geometry (passthrough)",
+        "5. Add modifier: obj.modifiers.new('GeometryNodes', 'NODES')",
+        "6. Assign tree: modifier.node_group = tree",
+        "7. Now insert nodes between Group Input and Group Output"
+      ],
+      "bpy_example": "See patterns/minimal_setup.py for working code"
+    },
+
+    "node_placement": {
+      "rule": "Node location is purely visual - (0,0) is valid, overlapping is fine for headless use",
+      "tip": "For visual clarity, place nodes left-to-right with ~200px horizontal spacing"
+    },
+
+    "linking": {
+      "rule": "tree.links.new(output_socket, input_socket) creates a connection",
+      "details": [
+        "Source must be an output socket, target must be an input socket",
+        "Invalid type connections create a link but mark it is_valid=False",
+        "A single output can connect to multiple inputs (fan-out)",
+        "An input can only have one connection (except multi-input sockets)",
+        "Multi-input sockets (like Join Geometry) accept multiple connections"
+      ]
+    }
+  },
+
+  "common_pitfalls": {
+    "description": "Things that commonly go wrong when building node trees programmatically",
+
+    "items": [
+      {
+        "pitfall": "Socket lookup by index is fragile",
+        "details": "Nodes may have hidden sockets or dynamic sockets that change with properties. Always look up sockets by name or identifier, never by index.",
+        "fix": "Use socket.identifier for stable references, socket.name for human display"
+      },
+      {
+        "pitfall": "Dynamic sockets change with node properties",
+        "details": "Some nodes change their socket count/types when you change a property. E.g., Math node shows different inputs based on operation. Set properties BEFORE connecting sockets.",
+        "fix": "Set node.operation (or equivalent) before accessing inputs/outputs"
+      },
+      {
+        "pitfall": "Evaluate After Trees requires depsgraph update",
+        "details": "After building a node tree, Blender may need a dependency graph update before the result is visible.",
+        "fix": "bpy.context.view_layer.update() or bpy.context.evaluated_depsgraph_get()"
+      },
+      {
+        "pitfall": "Some nodes only work in specific contexts",
+        "details": "Viewer node only works in the geometry nodes editor. Some nodes need an active object in context.",
+        "fix": "For headless testing, avoid Viewer-dependent logic"
+      },
+      {
+        "pitfall": "Socket default values may be None for non-simple types",
+        "details": "Geometry, Object, Collection, Image, Material sockets have no numeric default value.",
+        "fix": "Only read default_value for numeric/string socket types"
+      },
+      {
+        "pitfall": "Group Input/Output nodes are NOT auto-created by the API",
+        "details": "When you add interface sockets via tree.interface.new_socket(), the Blender UI would auto-create Group Input and Group Output nodes. The Python API does NOT do this. You must create them manually.",
+        "fix": "tree.nodes.new('NodeGroupInput') and tree.nodes.new('NodeGroupOutput') after adding interface sockets",
+        "discovered": "2026-02-21, empirically confirmed in Blender 4.5.6 LTS"
+      },
+      {
+        "pitfall": "Point clouds and instances are NOT mesh data",
+        "details": "Distribute Points on Faces outputs a POINT CLOUD, not mesh vertices. Instance on Points outputs INSTANCES (lightweight references), not geometry. Neither will appear when you call evaluated_obj.to_mesh() because to_mesh() only returns mesh components.",
+        "fix": "Use GeometryNodePointsToVertices to convert point clouds to mesh, and GeometryNodeRealizeInstances to convert instances to real geometry before evaluating as mesh.",
+        "discovered": "2026-02-21, patterns p02/p03 showed 0 vertex change until conversion nodes were added"
+      },
+      {
+        "pitfall": "Running multiple node tree operations in one Blender session can crash",
+        "details": "Sequentially creating/destroying objects and node trees in a single headless Blender session can cause EXCEPTION_ACCESS_VIOLATION. Using bpy.ops.object.delete() between operations is especially unstable.",
+        "fix": "Either use data-level cleanup (bpy.data.objects.remove()) or run each operation in a separate Blender subprocess. The subprocess approach is more reliable.",
+        "discovered": "2026-02-21, verify_patterns.py crashed until rewritten to use subprocess per pattern"
+      },
+      {
+        "pitfall": "bmesh-created objects may not evaluate geometry nodes correctly",
+        "details": "Objects created via bmesh (data-level API) may not get proper depsgraph evaluation for geometry nodes modifiers in headless mode. Objects created via bpy.ops.mesh.primitive_*_add() work correctly.",
+        "fix": "Use bpy.ops operators for creating test objects that will have geometry nodes modifiers applied.",
+        "discovered": "2026-02-21, bmesh-created planes showed no change after modifier application"
+      }
+    ]
+  }
+}

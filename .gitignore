@@ -1,0 +1,38 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+
+# Discovery outputs (regenerated per Blender version)
+discovery/node_catalog.json
+discovery/connection_matrix.json
+discovery/node_classification.json
+
+# Pattern outputs (regenerated per Blender version)
+patterns/pattern_catalog.json
+
+# Explorer results (large, generated)
+explorer/results/*.json
+
+# Knowledge base (generated)
+knowledge/blender_geonodes_kb.json
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+
+# Blender temp files
+*.blend1
+*.blend2
+
+# Node.js (MCPB extension)
+node_modules/
+package-lock.json
+
+# Windows artifacts
+nul
