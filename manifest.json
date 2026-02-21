@@ -1,0 +1,85 @@
+{
+  "manifest_version": "0.3",
+  "name": "blender-geonodes-ai",
+  "display_name": "Blender Geometry Nodes AI",
+  "version": "1.0.0",
+  "description": "AI-powered knowledge base for Blender geometry nodes — search nodes, check connections, find patterns, and generate scripts from your empirically-discovered node catalog.",
+  "long_description": "An MCP extension that wraps the Blender Geometry Nodes Discovery Engine. It provides tools to query a locally-built knowledge base of Blender's geometry nodes, check socket compatibility, browse verified node tree patterns, and generate complete Python scripts for Blender from natural language descriptions. The knowledge base is built by running discovery phases against your actual Blender installation, ensuring accuracy for your specific version.",
+  "author": {
+    "name": "jaegertros"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/jaegertros/blender-geonodes-ai.git"
+  },
+  "license": "MIT",
+  "keywords": ["blender", "geometry-nodes", "3d", "procedural", "code-generation", "knowledge-base"],
+  "server": {
+    "type": "node",
+    "entry_point": "server/index.js",
+    "mcp_config": {
+      "command": "node",
+      "args": ["${__dirname}/server/index.js"],
+      "env": {
+        "PROJECT_DIR": "${user_config.project_directory}",
+        "BLENDER_PATH": "${user_config.blender_path}"
+      }
+    }
+  },
+  "tools": [
+    {
+      "name": "search_nodes",
+      "description": "Search the Blender geometry node catalog by keyword, domain, or role"
+    },
+    {
+      "name": "get_node_details",
+      "description": "Get detailed information about a specific geometry node including inputs, outputs, and properties"
+    },
+    {
+      "name": "check_connection",
+      "description": "Check if two socket types can connect and what conversion (if any) is needed"
+    },
+    {
+      "name": "list_patterns",
+      "description": "List verified geometry node tree patterns (known-good recipes)"
+    },
+    {
+      "name": "get_pattern",
+      "description": "Get the full details of a specific verified node tree pattern"
+    },
+    {
+      "name": "generate_script",
+      "description": "Generate a complete Blender Python script for a geometry node tree from a natural language description"
+    },
+    {
+      "name": "get_kb_stats",
+      "description": "Get overview statistics of the knowledge base (node counts, domains, roles, coverage)"
+    },
+    {
+      "name": "run_discovery",
+      "description": "Run a discovery phase against the local Blender installation to build or update the knowledge base"
+    }
+  ],
+  "tools_generated": false,
+  "compatibility": {
+    "claude_desktop": ">=0.10.0",
+    "platforms": ["darwin", "win32", "linux"],
+    "runtimes": {
+      "node": ">=18.0.0"
+    }
+  },
+  "user_config": {
+    "project_directory": {
+      "type": "directory",
+      "title": "Project Directory",
+      "description": "Path to the blender-geonodes-ai project root containing discovery/, knowledge/, patterns/, etc.",
+      "required": true
+    },
+    "blender_path": {
+      "type": "file",
+      "title": "Blender Executable",
+      "description": "Path to your Blender executable (e.g., C:\\Program Files\\Blender Foundation\\Blender 4.5\\blender.exe). Required only for running discovery phases.",
+      "required": false
+    }
+  }
+}
