@@ -377,17 +377,21 @@ class _DAGBuilder:
         """Emit the build_tree() function as a string.
 
         Emission order matters because the C++ engine rebuilds socket
-        declarations when node properties change (e.g. Math.operation,
-        RandomValue.data_type).  We must set properties and defaults
-        per-node *before* emitting any links that reference those sockets.
-        """
-        # Post-processing: auto-insert Realize Instances if needed
-        self._ensure_realize_instances()
+    src_id = None
+    src_spec = {}
+    if instance_source:
+        src_id, src_spec = instance_source
+        src = dag.add(src_id, src_spec.get("name", src_id), col=1, row=1)
+    else:
+        src_id = "GeometryNodeMeshIcoSphere"
+        src_spec = nodes.get(src_id, {})
+        src = dag.add(src_id, "Ico Sphere", col=1, row=1)
+        dag.set_default(src, "Radius", 0.05)
 
-    dist_points_out = _find_socket(dist_spec, "out", "GEOMETRY") or "Points"
-    iop_points_in = _find_socket(inst_spec, "in", "POINTS") or "Points"
-    dag.wire(dist, dist_points_out, iop, iop_points_in)
-        lines.append("def build_tree():")
+    # Instance on Points — fan-in: points from Distribute + instance from source
+    iop = dag.add("GeometryNodeInstanceOnPoints", "Instance on Points", col=2, row=0)
+    dag.wire(dist, "Points", iop, "Points")
+    dag.wire(src, _find_socket(src_spec, "out", "GEOMETRY") or "Mesh", iop, "Instance")
         lines.append(f'    """Build geometry node tree: {self.description}"""')
         lines.append('    tree, gin, gout = create_node_tree("GeneratedTree")')
         lines.append("")
