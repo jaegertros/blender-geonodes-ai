@@ -466,16 +466,24 @@ def _build_scatter_instances(dag, nodes, context):
 
     # Instance on Points — fan-in: points from Distribute + instance from source
     iop = dag.add("GeometryNodeInstanceOnPoints", "Instance on Points", col=2, row=0)
-    dag.wire(dist, "Points", iop, "Points")
-    dag.wire(src, _find_socket(nodes.get(instance_source[0] if instance_source else "", {}), "out", "GEOMETRY") or "Mesh", iop, "Instance")
+    dist_points_out = _find_socket(dist_spec, "out", "VECTOR") or _find_socket(dist_spec, "out", "GEOMETRY") or "Points"
+    iop_points_in = _find_socket(inst_spec, "in", "VECTOR") or _find_socket(inst_spec, "in", "GEOMETRY") or "Points"
+    dag.wire(dist, dist_points_out, iop, iop_points_in)
+    iop_instance_in = _find_socket(inst_spec, "in", "OBJECT") or "Instance"
+    dag.wire(src, _find_socket(src_spec, "out", "GEOMETRY") or "Mesh", iop, iop_instance_in)
 
     # Optionally realize instances
     if "GeometryNodeRealizeInstances" in nodes:
+        real_spec = nodes.get("GeometryNodeRealizeInstances", {})
         real = dag.add("GeometryNodeRealizeInstances", "Realize Instances", col=3, row=0)
-        dag.wire(iop, "Instances", real, "Geometry")
-        dag.wire(real, "Geometry", "gout", "Geometry")
+        iop_instances_out = _find_socket(inst_spec, "out", "GEOMETRY") or "Instances"
+        real_geo_in = _find_socket(real_spec, "in", "GEOMETRY") or "Geometry"
+        real_geo_out = _find_socket(real_spec, "out", "GEOMETRY") or "Geometry"
+        dag.wire(iop, iop_instances_out, real, real_geo_in)
+        dag.wire(real, real_geo_out, "gout", "Geometry")
     else:
-        dag.wire(iop, "Instances", "gout", "Geometry")
+        iop_instances_out = _find_socket(inst_spec, "out", "GEOMETRY") or "Instances"
+        dag.wire(iop, iop_instances_out, "gout", "Geometry")
 
 
 def _build_boolean_op(dag, nodes, context):
@@ -527,10 +535,13 @@ def _build_join_geometry(dag, nodes, context):
     # Find generators to join
     gen_nodes = [(nid, spec) for nid, spec in nodes.items() if spec.get("role") == "generator"]
 
-    # If no generators are available, skip the Join Geometry node and pass
-    # input geometry straight through — a join with a single input is a no-op.
+    # If no generators are available, fall back to a simple passthrough
     if not gen_nodes:
-        dag.wire("gin", "Geometry", "gout", "Geometry")
+        join_geo_in = _find_socket(join_spec, "in", "GEOMETRY") or "Geometry"
+        join_geo_out = _find_socket(join_spec, "out", "GEOMETRY") or "Geometry"
+        join = dag.add("GeometryNodeJoinGeometry", "Join Geometry", col=1, row=0)
+        dag.wire("gin", "Geometry", join, join_geo_in)
+        dag.wire(join, join_geo_out, "gout", "Geometry")
         return
 
     placed_gens = []
@@ -643,16 +654,18 @@ def _build_linear_chain(dag, nodes, context):
 
         # Attach relevant field nodes as side-inputs
         non_geo_inputs = [s for s in spec.get("inputs", []) if s["type"] != "GEOMETRY"]
+        wired_inputs = set()  # Track which input sockets have been wired
         for field_nid, field_spec in fields:
             field_outputs = field_spec.get("outputs", [])
             for f_out in field_outputs:
                 for ng_in in non_geo_inputs:
-                    if _types_compatible(f_out["type"], ng_in["type"]):
+                    if ng_in["name"] not in wired_inputs and _types_compatible(f_out["type"], ng_in["type"]):
                         f_var = dag.add(field_nid, field_spec.get("name", field_nid),
                                         col=col + 1, row=field_row)
                         dag.wire(f_var, f_out["name"], var, ng_in["name"])
+                        wired_inputs.add(ng_in["name"])
                         field_row += 1
-                        break  # Only one field per input
+                        break  # Wire the first compatible output from this field node
                 else:
                     continue
                 break  # Move to next field node
