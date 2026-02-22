@@ -252,28 +252,24 @@ def generate_from_pattern(pattern, description, kb):
 #   2. Detect common multi-node idioms that imply branching
 #   3. Build a placement graph with explicit edges
 #   4. Emit code that adds nodes and wires them according to the graph
-
-# Recognised multi-node idioms (order matters — first match wins)
-IDIOMS = [
-    {
-        "name": "scatter_instances",
-        "description": "Distribute points on a surface then instance objects on them",
-        "trigger_nodes": {"GeometryNodeDistributePointsOnFaces", "GeometryNodeInstanceOnPoints"},
-        "optional_nodes": {"GeometryNodeRealizeInstances"},
-        "build": "_build_scatter_instances",
     },
     {
         "name": "boolean_op",
         "description": "Combine two geometry streams with a boolean operation",
         "trigger_nodes": {"GeometryNodeMeshBoolean"},
         "optional_nodes": set(),
-        "build": "_build_boolean_op",
     },
     {
         "name": "join_geometry",
         "description": "Merge multiple geometry streams",
         "trigger_nodes": {"GeometryNodeJoinGeometry"},
         "optional_nodes": set(),
+    },
+    {
+        "name": "curve_to_mesh",
+        "description": "Sweep a profile curve along a path curve",
+        "trigger_nodes": {"GeometryNodeCurveToMesh"},
+        "optional_nodes": {"GeometryNodeCurvePrimitiveCircle", "GeometryNodeCurvePrimitiveLine"},
         "build": "_build_join_geometry",
     },
     {
