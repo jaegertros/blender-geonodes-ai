@@ -86,18 +86,26 @@ def add_node(tree, type_id, location=(0, 0), **properties):
     return node
 
 
+def _match_socket(sockets, name):
+    """Find a socket by identifier first, then by display name.
+
+    Blender's C++ engine uses socket.identifier internally.  Display
+    names can collide (e.g. Math node has two "Value" inputs), so
+    matching by identifier is more reliable.
+    """
+    for s in sockets:
+        if s.identifier == name:
+            return s
+    for s in sockets:
+        if s.name == name:
+            return s
+    return None
+
+
 def link(tree, from_node, from_socket, to_node, to_socket):
-    """Link two sockets by name."""
-    out_socket = None
-    for s in from_node.outputs:
-        if s.name == from_socket:
-            out_socket = s
-            break
-    in_socket = None
-    for s in to_node.inputs:
-        if s.name == to_socket:
-            in_socket = s
-            break
+    """Link two sockets by identifier or name."""
+    out_socket = _match_socket(from_node.outputs, from_socket)
+    in_socket = _match_socket(to_node.inputs, to_socket)
     if not out_socket:
         raise ValueError(f"Output '{{from_socket}}' not found on {{from_node.name}}")
     if not in_socket:
@@ -293,6 +301,17 @@ def _find_all_sockets(spec, direction, socket_type):
     return [s["name"] for s in spec.get(key, []) if s["type"] == socket_type]
 
 
+# Node types whose geometry output contains unrealized instances.
+# Without Realize Instances, to_mesh() returns 0 vertices.
+_INSTANCE_PRODUCING_NODES = {
+    "GeometryNodeInstanceOnPoints",
+    "GeometryNodeGeometryToInstance",
+    "GeometryNodeCollectionInfo",
+    "GeometryNodeObjectInfo",
+    "GeometryNodeDuplicateElements",
+}
+
+
 class _DAGBuilder:
     """Accumulates nodes and edges, then emits code."""
 
@@ -320,35 +339,92 @@ class _DAGBuilder:
     def set_prop(self, var, prop_name, value):
         self.properties.append((var, prop_name, value))
 
+    def _ensure_realize_instances(self):
+        """Auto-insert Realize Instances before Group Output if needed.
+
+        The C++ engine keeps instances as a lightweight InstancesComponent
+        until explicitly realized.  Without this, to_mesh() returns zero
+        vertices and the generated script appears to produce nothing.
+        """
+        # Build var -> type_id lookup
+        var_to_type = {var: tid for var, tid, _, _, _ in self.nodes}
+
+        # Check if any instance-producing node wires directly to gout
+        needs_realize = False
+        links_to_patch = []
+        for i, (fv, fs, tv, ts) in enumerate(self.links):
+            if tv == "gout" and var_to_type.get(fv) in _INSTANCE_PRODUCING_NODES:
+                needs_realize = True
+                links_to_patch.append(i)
+
+        if not needs_realize:
+            return
+
+        # Check if Realize Instances already exists in the graph
+        for _, tid, _, _, _ in self.nodes:
+            if tid == "GeometryNodeRealizeInstances":
+                return  # Already present, builder handled it
+
+        # Find max column for placement
+        max_col = max((col for _, _, _, col, _ in self.nodes), default=1)
+        realize_var = self.add("GeometryNodeRealizeInstances",
+                               "Realize Instances", col=max_col + 1, row=0)
+
+        # Re-route: instance_node -> gout  becomes  instance_node -> realize -> gout
+        for idx in links_to_patch:
+            fv, fs, _, _ = self.links[idx]
+            self.links[idx] = (fv, fs, realize_var, "Geometry")
+
+        self.wire(realize_var, "Geometry", "gout", "Geometry")
+
     def emit(self):
-        """Emit the build_tree() function as a string."""
+        """Emit the build_tree() function as a string.
+
+        Emission order matters because the C++ engine rebuilds socket
+        declarations when node properties change (e.g. Math.operation,
+        RandomValue.data_type).  We must set properties and defaults
+        per-node *before* emitting any links that reference those sockets.
+        """
+        # Post-processing: auto-insert Realize Instances if needed
+        self._ensure_realize_instances()
+
         lines = []
         lines.append("def build_tree():")
         lines.append(f'    """Build geometry node tree: {self.description}"""')
         lines.append('    tree, gin, gout = create_node_tree("GeneratedTree")')
         lines.append("")
 
-        # Emit nodes
+        # Build lookup tables for per-node properties and defaults
+        props_by_var = {}
+        for var, pname, pval in self.properties:
+            props_by_var.setdefault(var, []).append((pname, pval))
+
+        defaults_by_var = {}
+        for var, sname, sval in self.defaults:
+            defaults_by_var.setdefault(var, []).append((sname, sval))
+
+        # Emit each node with its properties and defaults together
+        # (properties MUST be set before links — sockets can change)
         for var, tid, label, col, row in self.nodes:
             x = col * 250
             y = row * -250
             lines.append(f"    # {label}")
             lines.append(f'    {var} = add_node(tree, "{tid}", location=({x}, {y}))')
 
-        # Emit property overrides
-        for var, pname, pval in self.properties:
-            lines.append(f'    {var}.{pname} = {repr(pval)}')
+            # Set properties immediately (triggers socket rebuild in C++)
+            for pname, pval in props_by_var.get(var, []):
+                lines.append(f'    {var}.{pname} = {repr(pval)}')
 
-        # Emit socket defaults
-        for var, sname, sval in self.defaults:
-            if isinstance(sval, (list, tuple)):
-                lines.append(f'    {var}.inputs["{sname}"].default_value = {tuple(sval)}')
-            else:
-                lines.append(f'    {var}.inputs["{sname}"].default_value = {repr(sval)}')
+            # Set socket defaults
+            for sname, sval in defaults_by_var.get(var, []):
+                if isinstance(sval, (list, tuple)):
+                    lines.append(f'    {var}.inputs["{sname}"].default_value = {tuple(sval)}')
+                else:
+                    lines.append(f'    {var}.inputs["{sname}"].default_value = {repr(sval)}')
 
         lines.append("")
 
-        # Emit links
+        # Emit links (safe now — all nodes have their final socket layout)
         lines.append("    # Wire connections")
         for fv, fs, tv, ts in self.links:
             lines.append(f'    link(tree, {fv}, "{fs}", {tv}, "{ts}")')
