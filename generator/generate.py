@@ -384,7 +384,9 @@ class _DAGBuilder:
         # Post-processing: auto-insert Realize Instances if needed
         self._ensure_realize_instances()
 
-        lines = []
+    dist_points_out = _find_socket(dist_spec, "out", "GEOMETRY") or "Points"
+    iop_points_in = _find_socket(inst_spec, "in", "POINTS") or "Points"
+    dag.wire(dist, dist_points_out, iop, iop_points_in)
         lines.append("def build_tree():")
         lines.append(f'    """Build geometry node tree: {self.description}"""')
         lines.append('    tree, gin, gout = create_node_tree("GeneratedTree")')
