@@ -130,13 +130,25 @@ def export_tree_structure(tree):
             "location": list(node.location),
         }
 
-        # Capture key properties
+        # Capture key properties (filter out bl_ internal and UI-only props)
         props = {}
         for prop in node.bl_rna.properties:
-            if prop.identifier in ("rna_type", "name", "label", "location",
-                                   "width", "height", "color", "select",
-                                   "show_options", "hide", "mute", "use_custom_color",
-                                   "parent", "internal_links"):
+            if prop.identifier in (
+                "rna_type", "type", "name", "label", "location",
+                "width", "width_hidden", "height", "dimensions",
+                "color", "select", "show_options", "show_preview",
+                "hide", "mute", "show_texture", "use_custom_color",
+                "parent", "internal_links", "inputs", "outputs",
+                "is_active_output",
+                # bl_ internal properties - useless for generation
+                "bl_idname", "bl_label", "bl_description", "bl_icon",
+                "bl_static_type", "bl_width_default", "bl_width_min",
+                "bl_width_max", "bl_height_default", "bl_height_min",
+                "bl_height_max",
+            ):
+                continue
+            # Catch any other bl_ prefixed properties we didn't list
+            if prop.identifier.startswith("bl_"):
                 continue
             if prop.is_readonly:
                 continue

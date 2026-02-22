@@ -35,12 +35,21 @@ def build_node_profiles(catalog, classification, exploration_results):
     profiles = {}
 
     for node_id, cat_entry in catalog.get("nodes", {}).items():
+        # Filter out bl_ internal properties that aren't useful for generation
+        raw_props = cat_entry.get("properties", {})
+        clean_props = {
+            k: v for k, v in raw_props.items()
+            if not k.startswith("bl_") and k not in (
+                "color_tag", "warning_propagation", "location_absolute",
+            )
+        }
+
         profile = {
             "name": cat_entry.get("name", node_id),
             "type_id": node_id,
             "inputs": cat_entry.get("inputs", []),
             "outputs": cat_entry.get("outputs", []),
-            "properties": cat_entry.get("properties", {}),
+            "properties": clean_props,
         }
 
         # Add classification

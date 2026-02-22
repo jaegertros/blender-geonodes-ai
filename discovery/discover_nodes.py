@@ -79,6 +79,9 @@ def get_node_properties(node):
             "dimensions", "is_active_output",
         ):
             continue
+        # Catch any other bl_ prefixed internal properties
+        if prop.identifier.startswith("bl_"):
+            continue
 
         prop_info = {
             "name": prop.name,

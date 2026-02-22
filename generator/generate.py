@@ -159,12 +159,15 @@ def generate_from_pattern(pattern, description, kb):
         node_name = node.get("name", type_id)
         node_vars[node_name] = var_name
 
-        # Build properties string
+        # Build properties string (filter out bl_ internal and UI-only props)
         props = {}
         if node.get("properties"):
             for pname, pval in node["properties"].items():
-                if pname not in ("color_tag", "warning_propagation", "location_absolute"):
-                    props[pname] = pval
+                if pname.startswith("bl_"):
+                    continue
+                if pname in ("color_tag", "warning_propagation", "location_absolute"):
+                    continue
+                props[pname] = pval
 
         # Build input defaults
         defaults = node.get("input_defaults", {})
@@ -219,100 +222,400 @@ def generate_from_pattern(pattern, description, kb):
 
 
 # ──────────────────────────────────────────────────────────────────────
-# Compositional generation (for novel combinations)
+# Compositional generation — DAG builder (supports branching)
 # ──────────────────────────────────────────────────────────────────────
+#
+# Geometry node trees are Directed Acyclic Graphs, not linear chains.
+# The Python API assembles the DAG topology; the C++ runtime evaluates
+# it.  Common patterns that require branching:
+#
+#   Fan-out:  Group Input ──> Distribute Points ──┐
+#                         └──> Instance on Points ─┘──> Group Output
+#
+#   Fan-in:   Branch A ──┐
+#                         ├──> Join Geometry / Boolean ──> ...
+#             Branch B ──┘
+#
+#   Side-input: Field node (Math, Noise, etc.) feeding a non-geometry
+#               socket of a processor node.
+#
+# Strategy:
+#   1. Classify matched nodes by role (generator / processor / field)
+#   2. Detect common multi-node idioms that imply branching
+#   3. Build a placement graph with explicit edges
+#   4. Emit code that adds nodes and wires them according to the graph
 
-def generate_compositional(context, description, kb):
-    """Generate a script by composing nodes from the context.
+# Recognised multi-node idioms (order matters — first match wins)
+IDIOMS = [
+    {
+        "name": "scatter_instances",
+        "description": "Distribute points on a surface then instance objects on them",
+        "trigger_nodes": {"GeometryNodeDistributePointsOnFaces", "GeometryNodeInstanceOnPoints"},
+        "optional_nodes": {"GeometryNodeRealizeInstances"},
+        "build": "_build_scatter_instances",
+    },
+    {
+        "name": "boolean_op",
+        "description": "Combine two geometry streams with a boolean operation",
+        "trigger_nodes": {"GeometryNodeMeshBoolean"},
+        "optional_nodes": set(),
+        "build": "_build_boolean_op",
+    },
+    {
+        "name": "join_geometry",
+        "description": "Merge multiple geometry streams",
+        "trigger_nodes": {"GeometryNodeJoinGeometry"},
+        "optional_nodes": set(),
+        "build": "_build_join_geometry",
+    },
+    {
+        "name": "curve_to_mesh",
+        "description": "Sweep a profile curve along a path curve",
+        "trigger_nodes": {"GeometryNodeCurveToMesh"},
+        "optional_nodes": {"GeometryNodeCurvePrimitiveCircle", "GeometryNodeCurvePrimitiveLine"},
+        "build": "_build_curve_to_mesh",
+    },
+]
 
-    Strategy:
-      1. Identify the processing pipeline from the description
-      2. Select nodes that chain together (geo_out -> geo_in)
-      3. Connect them in sequence
-      4. Add field/value nodes as modifiers where appropriate
-    """
-    nodes = context["matched_nodes"]
 
-    # Separate by role
-    generators = [(nid, spec) for nid, spec in nodes.items() if spec.get("role") == "generator"]
-    processors = [(nid, spec) for nid, spec in nodes.items() if spec.get("role") == "processor"]
-    fields = [(nid, spec) for nid, spec in nodes.items() if spec.get("role") == "field"]
+def _find_socket(spec, direction, socket_type):
+    """Find the first socket of a given type in a node spec."""
+    key = "inputs" if direction == "in" else "outputs"
+    for s in spec.get(key, []):
+        if s["type"] == socket_type:
+            return s["name"]
+    return None
 
-    # Build a linear chain: input -> processors -> output
-    # If there are generators, they create geometry that feeds in
-    chain = []
 
-    # Start with processors that modify geometry
-    for nid, spec in processors:
-        if spec.get("observed_behavior") in ("MODIFIED", "PASSTHROUGH", "TYPE_CONVERTED"):
-            chain.append((nid, spec))
+def _find_all_sockets(spec, direction, socket_type):
+    """Find all sockets of a given type in a node spec."""
+    key = "inputs" if direction == "in" else "outputs"
+    return [s["name"] for s in spec.get(key, []) if s["type"] == socket_type]
 
-    # If no processors, try generators
-    if not chain and generators:
-        for nid, spec in generators:
-            chain.append((nid, spec))
 
-    # If still nothing, just passthrough
+class _DAGBuilder:
+    """Accumulates nodes and edges, then emits code."""
+
+    def __init__(self, description):
+        self.description = description
+        self.nodes = []          # (var_name, type_id, label, col, row)
+        self.links = []          # (from_var, from_sock, to_var, to_sock)
+        self.defaults = []       # (var_name, socket_name, value)
+        self.properties = []     # (var_name, prop_name, value)
+        self._var_counter = 0
+
+    def add(self, type_id, label, col=0, row=0):
+        """Add a node, return its variable name."""
+        var = f"node_{self._var_counter}"
+        self._var_counter += 1
+        self.nodes.append((var, type_id, label, col, row))
+        return var
+
+    def wire(self, from_var, from_sock, to_var, to_sock):
+        self.links.append((from_var, from_sock, to_var, to_sock))
+
+    def set_default(self, var, socket_name, value):
+        self.defaults.append((var, socket_name, value))
+
+    def set_prop(self, var, prop_name, value):
+        self.properties.append((var, prop_name, value))
+
+    def emit(self):
+        """Emit the build_tree() function as a string."""
+        lines = []
+        lines.append("def build_tree():")
+        lines.append(f'    """Build geometry node tree: {self.description}"""')
+        lines.append('    tree, gin, gout = create_node_tree("GeneratedTree")')
+        lines.append("")
+
+        # Emit nodes
+        for var, tid, label, col, row in self.nodes:
+            x = col * 250
+            y = row * -250
+            lines.append(f"    # {label}")
+            lines.append(f'    {var} = add_node(tree, "{tid}", location=({x}, {y}))')
+
+        # Emit property overrides
+        for var, pname, pval in self.properties:
+            lines.append(f'    {var}.{pname} = {repr(pval)}')
+
+        # Emit socket defaults
+        for var, sname, sval in self.defaults:
+            if isinstance(sval, (list, tuple)):
+                lines.append(f'    {var}.inputs["{sname}"].default_value = {tuple(sval)}')
+            else:
+                lines.append(f'    {var}.inputs["{sname}"].default_value = {repr(sval)}')
+
+        lines.append("")
+
+        # Emit links
+        lines.append("    # Wire connections")
+        for fv, fs, tv, ts in self.links:
+            lines.append(f'    link(tree, {fv}, "{fs}", {tv}, "{ts}")')
+
+        lines.append("")
+        lines.append("    return tree")
+        return "\n".join(lines)
+
+
+# ── Idiom builders ───────────────────────────────────────────────────
+
+def _build_scatter_instances(dag, nodes, context):
+    """Scatter + Instance pattern (fan-out from input geometry)."""
+    dist_spec = nodes.get("GeometryNodeDistributePointsOnFaces", {})
+    inst_spec = nodes.get("GeometryNodeInstanceOnPoints", {})
+
+    # Find a generator to use as instance source (ico sphere, cube, etc.)
+    instance_source = None
+    for nid, spec in nodes.items():
+        if spec.get("role") == "generator" and nid not in (
+            "GeometryNodeDistributePointsOnFaces", "GeometryNodeInstanceOnPoints",
+        ):
+            instance_source = (nid, spec)
+            break
+
+    # Distribute Points on Faces — takes the input geometry
+    dist = dag.add("GeometryNodeDistributePointsOnFaces", "Distribute Points on Faces", col=1, row=0)
+    dag.wire("gin", "Geometry", dist, _find_socket(dist_spec, "in", "GEOMETRY") or "Mesh")
+
+    # Instance source (generator or default to Ico Sphere)
+    if instance_source:
+        src_id, src_spec = instance_source
+        src = dag.add(src_id, src_spec.get("name", src_id), col=1, row=1)
+    else:
+        src = dag.add("GeometryNodeMeshIcoSphere", "Ico Sphere", col=1, row=1)
+        dag.set_default(src, "Radius", 0.05)
+
+    # Instance on Points — fan-in: points from Distribute + instance from source
+    iop = dag.add("GeometryNodeInstanceOnPoints", "Instance on Points", col=2, row=0)
+    dag.wire(dist, "Points", iop, "Points")
+    dag.wire(src, _find_socket(nodes.get(instance_source[0] if instance_source else "", {}), "out", "GEOMETRY") or "Mesh", iop, "Instance")
+
+    # Optionally realize instances
+    if "GeometryNodeRealizeInstances" in nodes:
+        real = dag.add("GeometryNodeRealizeInstances", "Realize Instances", col=3, row=0)
+        dag.wire(iop, "Instances", real, "Geometry")
+        dag.wire(real, "Geometry", "gout", "Geometry")
+    else:
+        dag.wire(iop, "Instances", "gout", "Geometry")
+
+
+def _build_boolean_op(dag, nodes, context):
+    """Boolean operation — fan-in of two geometry streams."""
+    bool_spec = nodes.get("GeometryNodeMeshBoolean", {})
+
+    # Find a generator for the second operand
+    gen_source = None
+    for nid, spec in nodes.items():
+        if spec.get("role") == "generator":
+            gen_source = (nid, spec)
+            break
+
+    # Second geometry source (or default to a sphere)
+    if gen_source:
+        src_id, src_spec = gen_source
+        src = dag.add(src_id, src_spec.get("name", src_id), col=1, row=1)
+        src_out = _find_socket(src_spec, "out", "GEOMETRY") or "Mesh"
+    else:
+        src = dag.add("GeometryNodeMeshUVSphere", "UV Sphere", col=1, row=1)
+        dag.set_default(src, "Radius", 0.8)
+        src_out = "Mesh"
+
+    # Boolean node — two geometry inputs
+    boolean = dag.add("GeometryNodeMeshBoolean", "Mesh Boolean", col=2, row=0)
+
+    # Determine the operation enum if available
+    enum_props = bool_spec.get("enum_properties", {})
+    if "operation" in enum_props:
+        dag.set_prop(boolean, "operation", "DIFFERENCE")
+
+    # Mesh Boolean has "Mesh 1" (or "Mesh") + "Mesh 2" inputs
+    bool_geo_ins = _find_all_sockets(bool_spec, "in", "GEOMETRY")
+    if len(bool_geo_ins) >= 2:
+        dag.wire("gin", "Geometry", boolean, bool_geo_ins[0])
+        dag.wire(src, src_out, boolean, bool_geo_ins[1])
+    else:
+        # Fallback: single geometry input (join first)
+        dag.wire("gin", "Geometry", boolean, bool_geo_ins[0] if bool_geo_ins else "Mesh")
+
+    bool_geo_out = _find_socket(bool_spec, "out", "GEOMETRY") or "Mesh"
+    dag.wire(boolean, bool_geo_out, "gout", "Geometry")
+
+
+def _build_join_geometry(dag, nodes, context):
+    """Join Geometry — fan-in of input geometry plus generated geometry."""
+    join_spec = nodes.get("GeometryNodeJoinGeometry", {})
+
+    # Find generators to join
+    gen_nodes = [(nid, spec) for nid, spec in nodes.items() if spec.get("role") == "generator"]
+
+    placed_gens = []
+    for i, (nid, spec) in enumerate(gen_nodes[:3]):  # Max 3 generators
+        g = dag.add(nid, spec.get("name", nid), col=1, row=i + 1)
+        placed_gens.append((g, spec))
+
+    join = dag.add("GeometryNodeJoinGeometry", "Join Geometry", col=2, row=0)
+
+    # Input geometry is the first stream
+    join_geo_in = _find_socket(join_spec, "in", "GEOMETRY") or "Geometry"
+    dag.wire("gin", "Geometry", join, join_geo_in)
+
+    # Connect generators (Join Geometry has a multi-input socket —
+    # linking multiple outputs to the same input socket is valid)
+    for g_var, g_spec in placed_gens:
+        g_out = _find_socket(g_spec, "out", "GEOMETRY") or "Mesh"
+        dag.wire(g_var, g_out, join, join_geo_in)
+
+    join_geo_out = _find_socket(join_spec, "out", "GEOMETRY") or "Geometry"
+    dag.wire(join, join_geo_out, "gout", "Geometry")
+
+
+def _build_curve_to_mesh(dag, nodes, context):
+    """Curve to Mesh — sweep a profile along a path."""
+    ctm_spec = nodes.get("GeometryNodeCurveToMesh", {})
+
+    # Profile curve source
+    profile_src = None
+    for nid in ("GeometryNodeCurvePrimitiveCircle",):
+        if nid in nodes:
+            profile_src = (nid, nodes[nid])
+            break
+
+    profile = dag.add(
+        profile_src[0] if profile_src else "GeometryNodeCurvePrimitiveCircle",
+        profile_src[1].get("name", "Curve Circle") if profile_src else "Curve Circle",
+        col=1, row=1,
+    )
+    if not profile_src:
+        dag.set_default(profile, "Radius", 0.1)
+
+    # Curve to Mesh
+    ctm = dag.add("GeometryNodeCurveToMesh", "Curve to Mesh", col=2, row=0)
+
+    # Path curve from input geometry
+    ctm_ins = [s["name"] for s in ctm_spec.get("inputs", []) if s["type"] == "GEOMETRY"]
+    # Typically: "Curve" and "Profile Curve"
+    if len(ctm_ins) >= 2:
+        dag.wire("gin", "Geometry", ctm, ctm_ins[0])  # path
+        profile_out = _find_socket(
+            nodes.get(profile_src[0], {}) if profile_src else {}, "out", "GEOMETRY"
+        ) or "Curve"
+        dag.wire(profile, profile_out, ctm, ctm_ins[1])  # profile
+    elif ctm_ins:
+        dag.wire("gin", "Geometry", ctm, ctm_ins[0])
+
+    ctm_out = _find_socket(ctm_spec, "out", "GEOMETRY") or "Mesh"
+    dag.wire(ctm, ctm_out, "gout", "Geometry")
+
+
+# ── Idiom dispatch table ─────────────────────────────────────────────
+
+_IDIOM_BUILDERS = {
+    "scatter_instances": _build_scatter_instances,
+    "boolean_op": _build_boolean_op,
+    "join_geometry": _build_join_geometry,
+    "curve_to_mesh": _build_curve_to_mesh,
+}
+
+
+# ── Linear fallback (for simple single-stream processing) ────────────
+
+def _build_linear_chain(dag, nodes, context):
+    """Fallback: chain processors in sequence with field side-inputs."""
+    processors = [(nid, spec) for nid, spec in nodes.items()
+                  if spec.get("role") == "processor"
+                  and spec.get("observed_behavior") in ("MODIFIED", "PASSTHROUGH", "TYPE_CONVERTED")]
+
+    generators = [(nid, spec) for nid, spec in nodes.items()
+                  if spec.get("role") == "generator"]
+
+    fields = [(nid, spec) for nid, spec in nodes.items()
+              if spec.get("role") == "field"]
+
+    chain = processors if processors else generators
+
     if not chain:
-        chain = [("GeometryNodeSubdivideMesh", nodes.get("GeometryNodeSubdivideMesh", {
+        chain = [("GeometryNodeSubdivideMesh", {
             "name": "Subdivide Mesh",
             "inputs": [{"name": "Mesh", "type": "GEOMETRY"}, {"name": "Level", "type": "INT"}],
             "outputs": [{"name": "Mesh", "type": "GEOMETRY"}],
-        }))]
+        })]
 
-    lines = []
-    lines.append("def build_tree():")
-    lines.append(f'    """Build geometry node tree: {description}"""')
-    lines.append('    tree, gin, gout = create_node_tree("GeneratedTree")')
-    lines.append("")
+    prev_geo = ("gin", "Geometry")
+    field_row = 1  # Place field nodes below the main chain
 
-    node_vars = {}
-    x_pos = 0
-    prev_geo_output = ("gin", "Geometry")  # Start from group input
-
-    for i, (nid, spec) in enumerate(chain[:8]):  # Limit chain length
-        var_name = f"node_{i}"
-        node_vars[nid] = var_name
+    for col, (nid, spec) in enumerate(chain[:8]):
         name = spec.get("name", nid)
+        var = dag.add(nid, name, col=col + 1, row=0)
 
-        lines.append(f"    # {name}")
-        lines.append(f'    {var_name} = add_node(tree, "{nid}", location=({x_pos}, 0))')
+        geo_in = _find_socket(spec, "in", "GEOMETRY")
+        geo_out = _find_socket(spec, "out", "GEOMETRY")
 
-        # Find geometry input socket
-        geo_in = None
-        for s in spec.get("inputs", []):
-            if s["type"] == "GEOMETRY":
-                geo_in = s["name"]
-                break
-
-        # Find geometry output socket
-        geo_out = None
-        for s in spec.get("outputs", []):
-            if s["type"] == "GEOMETRY":
-                geo_out = s["name"]
-                break
-
-        # Connect previous output to this input
-        if geo_in and prev_geo_output:
-            from_var, from_sock = prev_geo_output
-            lines.append(f'    link(tree, {from_var}, "{from_sock}", {var_name}, "{geo_in}")')
-
-        # Track output for next node
+        # Connect geometry stream
+        if geo_in and prev_geo:
+            dag.wire(prev_geo[0], prev_geo[1], var, geo_in)
         if geo_out:
-            prev_geo_output = (var_name, geo_out)
+            prev_geo = (var, geo_out)
 
-        lines.append("")
-        x_pos += 250
+        # Attach relevant field nodes as side-inputs
+        non_geo_inputs = [s for s in spec.get("inputs", []) if s["type"] != "GEOMETRY"]
+        for field_nid, field_spec in fields:
+            field_outputs = field_spec.get("outputs", [])
+            for f_out in field_outputs:
+                for ng_in in non_geo_inputs:
+                    if _types_compatible(f_out["type"], ng_in["type"]):
+                        f_var = dag.add(field_nid, field_spec.get("name", field_nid),
+                                        col=col + 1, row=field_row)
+                        dag.wire(f_var, f_out["name"], var, ng_in["name"])
+                        field_row += 1
+                        break  # Only one field per input
+                else:
+                    continue
+                break  # Move to next field node
 
-    # Connect last node to output
-    if prev_geo_output:
-        from_var, from_sock = prev_geo_output
-        lines.append(f'    link(tree, {from_var}, "{from_sock}", gout, "Geometry")')
+    # Final output
+    if prev_geo:
+        dag.wire(prev_geo[0], prev_geo[1], "gout", "Geometry")
 
-    lines.append("")
-    lines.append("    return tree")
 
-    return "\n".join(lines)
+def _types_compatible(out_type, in_type):
+    """Check if two socket types can connect (based on Blender's implicit conversions)."""
+    if out_type == in_type:
+        return True
+    numeric = {"BOOLEAN", "INT", "VALUE", "FLOAT", "RGBA", "VECTOR"}
+    if out_type in numeric and in_type in numeric:
+        return True
+    return False
+
+
+# ── Main compositional entry point ───────────────────────────────────
+
+def generate_compositional(context, description, kb):
+    """Generate a script by composing nodes into a DAG.
+
+    Strategy:
+      1. Check matched nodes against known multi-node idioms
+      2. If an idiom matches, use its specialised builder (handles branching)
+      3. Otherwise, fall back to linear chain with field side-inputs
+    """
+    nodes = context["matched_nodes"]
+    matched_ids = set(nodes.keys())
+
+    dag = _DAGBuilder(description)
+
+    # Try idioms (first match wins)
+    used_idiom = None
+    for idiom in IDIOMS:
+        if idiom["trigger_nodes"].issubset(matched_ids):
+            builder_fn = _IDIOM_BUILDERS[idiom["name"]]
+            builder_fn(dag, nodes, context)
+            used_idiom = idiom["name"]
+            break
+
+    if not used_idiom:
+        _build_linear_chain(dag, nodes, context)
+
+    return dag.emit()
 
 
 # ──────────────────────────────────────────────────────────────────────
