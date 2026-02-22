@@ -80,6 +80,32 @@ blender-geonodes-ai/
 
 The whole point of empirical discovery: run against Blender 4.5, get a 4.5-accurate catalog. Run against 5.0, get a 5.0 catalog. No manual documentation maintenance needed.
 
+## MCPB Desktop Extension
+
+This project includes an MCP Bundle (Desktop Extension) that gives Claude for Desktop direct access to the knowledge base.
+
+### Extension Setup
+
+```bash
+cd mcpb/
+npm install
+mcpb pack
+# Open the .mcpb file with Claude for Desktop
+```
+
+### Extension Tools
+
+| Tool | Description |
+|------|-------------|
+| `search_nodes` | Search the node catalog by keyword, domain, or role |
+| `get_node_details` | Get complete details about a specific node (inputs, outputs, properties) |
+| `check_connection` | Check if two socket types can connect (DIRECT/CONVERT/INVALID) |
+| `list_patterns` | List all verified geometry node tree patterns |
+| `get_pattern` | Get full details of a specific pattern |
+| `generate_script` | Generate a Blender Python script from natural language |
+| `get_kb_stats` | Overview statistics and data source status |
+| `run_discovery` | Run discovery phases against your local Blender |
+
 ## License
 
 MIT

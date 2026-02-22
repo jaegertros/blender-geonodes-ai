@@ -1,0 +1,11 @@
+{
+  "name": "blender-geonodes-ai",
+  "version": "1.0.0",
+  "description": "MCP extension for Blender Geometry Nodes AI knowledge base",
+  "type": "module",
+  "main": "server/index.js",
+  "license": "MIT",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.12.1"
+  }
+}
