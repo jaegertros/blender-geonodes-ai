@@ -527,6 +527,12 @@ def _build_join_geometry(dag, nodes, context):
     # Find generators to join
     gen_nodes = [(nid, spec) for nid, spec in nodes.items() if spec.get("role") == "generator"]
 
+    # If no generators are available, skip the Join Geometry node and pass
+    # input geometry straight through — a join with a single input is a no-op.
+    if not gen_nodes:
+        dag.wire("gin", "Geometry", "gout", "Geometry")
+        return
+
     placed_gens = []
     for i, (nid, spec) in enumerate(gen_nodes[:3]):  # Max 3 generators
         g = dag.add(nid, spec.get("name", nid), col=1, row=i + 1)
